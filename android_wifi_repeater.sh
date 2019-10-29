@@ -4,11 +4,11 @@
 
 [ "$(id -u)" != 0 ] && echo 'Not running as root!' && exit
 
-SSID=mnet                           # set this to your desired string (avoid spaces and non-ascii characters)
-PASSCODE=foobarfo               # set this to your desired string (8 to 63 characters)
+SSID=YOURNETNAME                           # set this to your desired string (avoid spaces and non-ascii characters)
+PASSCODE=foobarfo              # set this to your desired string (8 to 63 characters)
 WIFI_INTERFACE=wlan0                # set this according to your device (lshw | grep -A10 Wireless | grep 'logical name')
 SUBNET=10.0.0                   # must be different than WIFI_INTERFACE
-AP_INTERFACE=mnet
+AP_INTERFACE=$WIFI_INTERFACE-1
 IP=${SUBNET}.1
 DIR=/data/local/tmp/$AP_INTERFACE
 
@@ -29,7 +29,7 @@ STOP()
     iptables -t nat -D POSTROUTING -s ${SUBNET}.0/24 ! -o $AP_INTERFACE -j MASQUERADE
     iptables -D FORWARD -i $AP_INTERFACE -s ${IP}/24 -j ACCEPT
     iptables -D FORWARD -i $WIFI_INTERFACE -d ${SUBNET}.0/24 -j ACCEPT
- þ   # delete AP interface
+ Ã¾   # delete AP interface
     ip link show | grep "${AP_INTERFACE}:" && iw $AP_INTERFACE del
 } >/dev/null 2>&1
 
@@ -78,6 +78,8 @@ FIND_CHANNEL()
     #[ ! -z "$CHANNEL" ] || CHANNEL=11
 }
 
+##This is meant to determine between 2.4GHz and 5GHz based on host network
+##It doesn't work currently, best to use 2.4GHz for now...
 #GET_BAND()
 #{
 #    MODE="$(iw dev wlan0 link | grep -i freq | cut -c 8)"

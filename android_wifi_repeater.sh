@@ -9,7 +9,7 @@ SUBNET=10.0.0                   # must be different than WIFI
 PASSCODE=foobarfoo
 AP=rnet
 IP=${SUBNET}.1
-DIR=/data/local/wifi
+DIR=/data/local/$AP
 
 mkdir -p $DIR
 

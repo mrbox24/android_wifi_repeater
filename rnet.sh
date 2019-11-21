@@ -29,7 +29,7 @@ DOWN()
     iptables -t nat -D POSTROUTING -s ${SUBNET}.0/24 ! -o $AP -j MASQUERADE
     iptables -D FORWARD -i $AP -s ${IP}/24 -j ACCEPT
     iptables -D FORWARD -i $WIFI -d ${SUBNET}.0/24 -j ACCEPT
- þ   # delete AP interface
+    # delete AP interface
     ip link show | grep "${AP}:" && iw $AP del
     rm -r $DIR
 } >/dev/null 2>&1

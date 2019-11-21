@@ -10,8 +10,14 @@ PASSCODE=foobarfoo
 AP=rnet
 IP=${SUBNET}.1
 DIR=/data/local/$AP
-
 mkdir -p $DIR
+
+USAGE()
+{
+    echo 'options'
+    printf '\t%s\n' "$(basename "$0"): up | down | clients"
+    exit
+}
 
 DOWN()
 {
@@ -25,7 +31,9 @@ DOWN()
     iptables -D FORWARD -i $WIFI -d ${SUBNET}.0/24 -j ACCEPT
  þ   # delete AP interface
     ip link show | grep "${AP}:" && iw $AP del
+    rm -r $DIR
 } >/dev/null 2>&1
+
 
 CHECKS()
 {
@@ -88,7 +96,7 @@ ADD_IP_ROUTE()
 HOSTAPD_CONFIG()
 {
     # hostapd configuration
-    mkdir -p $DIR/hostapd
+    mkdir -p $DIR/hostapd/ctrl
 	cat <<-EOF >$DIR/hostapd.conf
 	# network name
 	ssid=$SSID
@@ -114,8 +122,8 @@ HOSTAPD_CONFIG()
 	wpa=2
 	# wireless protected access psk
 	wpa_passphrase=$PASSCODE
-	# use wpa_passphrase rnet foobarfoo
-	#wpa_psk=
+	# use wpa_passphrase mnet foobarfoo
+	#wpa_psk=89730efaed4bc0405db01be7d0c7a6361160a97b483f4e497ec6331cc56d6fb7
 	#rsn_pairwise=CCMP
 	# WPA protocol
 	wpa_key_mgmt=WPA-PSK
@@ -174,7 +182,13 @@ if [ "$1" = down ]; then
     exit
 fi
 
-[ "$1" = start ]
+if [ "$1" = clients ]; then
+    #echo "IP address       HW type     Flags       HW address            Mask     Device"
+    cat /proc/net/arp|grep -e Device -e $AP
+    exit
+fi
+
+[ "$1" = up ] || USAGE
 
 # basic check
 CHECKS
@@ -191,7 +205,8 @@ ADD_IP_ROUTE
 # configure acces point daemon
 HOSTAPD_CONFIG
 # start hostapd
-hostapd  -B -d -e$DIR/entropy.bin -g$DIR/hostapd/ctrl/$AP  $DIR/hostapd.conf |xargs >/sdcard/rnet.log &2>&1
+ln -s /data/misc/wifi/entropy.bin $DIR/entropy.bin
+hostapd  -B -d -e$DIR/entropy.bin -g$DIR/hostapd/ctrl/$AP  $DIR/hostapd.conf
 # share internet from Wi-Fi to AP
 INTERNET_SHARE
 # run a dhcp server to assign IP's dynamically
@@ -206,8 +221,6 @@ else
     BND=5GHz
 fi
 
-
 echo wifi: \| $HSSID \| $BSS \| "$(ifconfig "$WIFI"|head -n 2|tail -n 1|cut -d : -f 2 |cut -d B -f 1|cut -d\( -f 2 |tr -d ' ')" \| $SIGNL \|
 echo AP: \| $SSID \| "$(ifconfig "$AP" |head -n 1 |cut -d H -f 2|cut -c 7-24|tr -d ' ')" \| $IP \| $CH \| $FRQ \| $BND \|
-echo
-echo stop with: $(printf '\t%s\n'|tr -d '[:blank:]') $(basename "$0") down
+

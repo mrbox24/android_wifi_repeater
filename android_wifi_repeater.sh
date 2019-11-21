@@ -64,7 +64,7 @@ TARGET_INFO()
 
 SETHW()
 {
-    if  [ "$CH" -lt "14" ]; then
+    if  [[ "$CH" -lt "14" ]]; then
         HW=g
     else 
         HW=a
@@ -122,8 +122,8 @@ HOSTAPD_CONFIG()
 	wpa=2
 	# wireless protected access psk
 	wpa_passphrase=$PASSCODE
-	# use wpa_passphrase mnet foobarfoo
-	#wpa_psk=89730efaed4bc0405db01be7d0c7a6361160a97b483f4e497ec6331cc56d6fb7
+	# use wpa_passphrase rnet foobarfoo
+	#wpa_psk=
 	#rsn_pairwise=CCMP
 	# WPA protocol
 	wpa_key_mgmt=WPA-PSK

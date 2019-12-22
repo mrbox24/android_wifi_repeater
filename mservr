@@ -1,0 +1,466 @@
+#!/system/bin/sh
+#set -e
+#set -x
+##TODO Fix USAGE message if called without an argument
+#BE AWARE THAT A "TAB" IS NEEDED BEFORE EACH LINE OF THE CAT<<-EOF> "HERE" FILES!
+
+SSID=mnet                           # set this to your desired string (avoid spaces and non-ascii characters)
+WIFI=wlan0                # set this according to your device (lshw | grep -A10 Wireless | grep 'logical name')
+SUBNET=10.0.0                   # must be different than WIFI
+PASSPHRASE=foobarfoo
+AP=mnet0
+IP=${SUBNET}.1
+DIR=/data/misc/wifi
+
+USAGE()
+{
+    	echo 'options'
+    	printf '\t%s\n' "$(basename "$0"): up | down | arp | log"
+}
+
+DOWN()
+{
+    # hope there are no other instances of same daemons
+    pkill hostapd
+    kill  "$(pidof dnsmasq)"
+    pkill mserv
+    # remove iptables rules
+    iptables -D INPUT -i $AP -p udp -m udp --dport 67 -j ACCEPT
+    iptables -t nat -D POSTROUTING -s ${SUBNET}.0/24 ! -o $AP -j MASQUERADE
+    iptables -D FORWARD -i $AP -s ${IP}/24 -j ACCEPT
+    iptables -D FORWARD -i $WIFI -d ${SUBNET}.0/24 -j ACCEPT
+    # delete AP interface
+    ip link show | grep "${AP}:" && iw $AP del
+} > /dev/null 2>&1
+
+CHECKS()
+{
+    for binary in iw ip iptables hostapd dnsmasq; do
+
+        which $binary >/dev/null && continue
+        exit
+    done
+
+    # this check is necessary if need to use single channel
+    if iw dev $WIFI link | grep -q '^Not connected'
+    then
+        echo 'Connect to target network first....'
+#       exit
+    fi
+}
+
+TARGET_INFO()
+{
+    # Here we set vars for hostapd
+    iw $WIFI scan | head -n 11 >/data/local/tmp/scn
+    FRQ=$(cat /data/local/tmp/scn | grep freq | cut -d : -f 2 | tr -d ' ')
+    HSSID=$(cat /data/local/tmp/scn | grep SSID | cut -d : -f 2 | tr -d ' ')
+    CH=$(cat /data/local/tmp/scn | grep channel | cut -d l -f 2 | tr -d ' ')
+    BSS=$(cat /data/local/tmp/scn|grep BSS|cut -d S -f 3 |cut -d - -f 1|tr -d ' '|cut -c 1-17)
+    SIGNL=$(cat /data/local/tmp/scn|grep signal| cut -d : -f 2|tr -d ' ')
+}
+
+SETHW()
+{
+    if  [ "$CH" -lt 14 ]; then
+        HW=g
+    else
+        HW=a
+    fi
+
+#    if  [ "$CH" -lt 14 ]; then
+#        VHCH=1
+#    else
+#        VHCH=36
+#    fi
+
+
+
+    if [ "$HW" = a ]; then
+        VHT=[VHT20][VHT40][SHORT-GI-20][SHORT-GI-40][LSIG-TXOP-PROT][GF]
+    else
+        HT=[VHT40][HT20][HT40][SHORT-GI-20][LSIG-TXOP-PROT][GF]
+    fi
+
+    if [ "$HW" = a ]; then
+        IDX=42
+    fi
+
+#    if [ "$HW" = a ]; then
+#        CLST=36,42,44,48
+#    else
+#        CLST=1,2,3,4,5,6,7,8,9,10,11
+#    fi
+
+
+}
+
+CREATE_AP()
+{
+    if ! iw dev $WIFI interface add $AP type __ap
+    then
+        echo "Couldn't create AP."  # :(
+        exit
+    fi
+}
+
+ADD_IP_ROUTE()
+{
+    # activate the interface and add IP
+    ip link set up dev $AP
+    ip addr add ${IP}/24 broadcast ${SUBNET}.255 dev $AP
+
+    # routing table 97 needs to be put necessarily on Android
+    # because in main table, route for $WIFI takes priority (ip route show)
+    # and all traffic goes there ignoring $AP
+þ    ip route add ${SUBNET}.0/24 dev $AP table 97
+}
+
+
+HOSTAPD_CONFIG()
+{
+    # hostapd configuration
+    if [ -e $DIR/hostapd.conf ]; then
+        rm $DIR/hostapd.conf
+    fi
+	cat <<-EOF >$DIR/hostapd.conf
+	# network name
+	ssid=$SSID
+	# region
+	country_code=US
+#	country3=0x58
+	# network interface to listen on
+	interface=$AP
+	# wi-fi driver
+	driver=nl80211
+	# ctrl interface
+	#ctrl_interface=/data/misc/wifi/hostapd/ctrl
+	# barrowed from host hostapd.conf
+	ignore_broadcast_ssid=0
+	# HT config
+	ieee80211n=1
+	require_ht=1
+	ht_capab=$HT
+	ieee80211ac=1
+	require_vht=1
+	vht_capab=$VHT
+	# testing options for stability
+	ieee80211h=1
+	ieee80211d=1
+	channel=$CH
+	#op_class=$OC
+#	vht_oper_chwidth=1
+#	vht_oper_centr_freq_seg0_idx=$IDX
+#	vht_oper_centr_freq_seg1_idx=$ID2
+	# test stuffsr
+	macaddr_acl=0
+	# ser operation mode, what frequency to use
+	hw_mode=$HW
+	# enforce Wireless Protected Access (WPA)
+	wpa=2
+	# wireless protected access psk
+	wpa_passphrase=$PASSPHRASE
+	# use wpa_passphrase rnet foobarfoo
+	#wpa_psk=
+	rsn_pairwise=CCMP
+	# WPA protocol
+	wpa_key_mgmt=WPA-PSK
+	# log stuffs
+	logger_syslog=-1
+	logger_syslog_level=0
+	logger_stdout=-1
+	logger_stdout_level=0
+	EOF
+}
+
+
+INTERNET_SHARE()
+{
+    # allow IP forwarding
+    echo 1 >/proc/sys/net/ipv4/ip_forward
+    # route and allow forwrding through firewall
+    iptables -t nat -I POSTROUTING -s ${SUBNET}.0/24 ! -o $AP -j MASQUERADE
+    iptables -I FORWARD -i $AP -s ${IP}/24 -j ACCEPT
+    iptables -I FORWARD -i $WIFI -d ${SUBNET}.0/24 -j ACCEPT
+}
+
+
+DHCP_SERVER()
+{
+    # configuration
+    if [ -e $DIR/dnsmasq.conf ]; then
+       rm $DIR/dnsmasq.conf
+    fi
+
+    cat <<-EOF >$DIR/dnsmasq.conf
+	# we dont want DNS server, only DHCP
+	port=0
+	# only listen on AP interface
+	interface=$AP
+	listen-address=$IP
+	#bind-interfaces
+	# range of IPs to make available to wlan devices andwhen to renew IP
+	dhcp-range=${SUBNET}.2,${SUBNET}.254,24h
+	# uncomment for captive portal redirect
+	address=/#/10.0.0.1
+	# where to save leases
+	dhcp-leasefile=$DIR/dnsmasq.leases
+	# set default gateway
+	dhcp-option-force=option:router,$IP
+	# add OpenDNS servers for DNS lookup to announce
+	dhcp-option-force=option:dns-server,1.1.1.1,1.0.0.1
+	dhcp-option-force=option:mtu,1500
+	# respond to a client who is requesting from a different IP broadcast subnet
+	# or requesting an out of range / occupied IP
+	# or requesting an IP from expired lease of previous sessions
+	# or obtained from some other server which is offline now
+	dhcp-authoritative
+	# don't look for any hosts file and resolv file
+	no-hosts
+	no-resolv
+	EOF
+
+    # open listening port
+    iptables -I INPUT -i $AP -p udp -m udp --dport 67 -j ACCEPT
+
+    # start dhcp server
+    dnsmasq -x $DIR/dnsmasq.pid -C $DIR/dnsmasq.conf &
+}
+
+WEB_PORTAL() {
+##here is spawned a minimal click-through web through
+    cat<<-EOF>$DIR/mserv
+	#!/usr/bin/python
+	import subprocess
+	import BaseHTTPServer
+	import cgi
+	
+	# These variables are used as settings
+	PORT       = 9090         # the port in which the captive portal web server listens 
+	IFACE      = "mnet0"      # the interface that captive portal protects
+	IP_ADDRESS = "10.0.0.1" # the ip address of the captive portal (it can be the IP of IFACE) 
+	
+	'''
+	This it the http server used by the the captive portal
+	'''
+	class WebPortal(BaseHTTPServer.BaseHTTPRequestHandler):
+	    #this is the index of the captive portal
+	    #it simply redirects the user to the to login page
+	    html_redirect = """
+	    <html>
+	    <head>
+	        <meta http-equiv="refresh" content="0; url=http://%s:%s/login" />
+	    </head>
+	    <body>
+	        <b>Redirecting to login page</b>
+	    </body>
+	    </html>
+	    """%(IP_ADDRESS, PORT)
+	    #the login page
+	    html_login = """
+	    <html>
+	    <head>
+	        <title>mnet agree</title>
+	        <style>
+	            body {
+	            color:#F1F3F3;
+	            background-image: url("https://wallpapercave.com/wp/tmHAeyV.jpg");
+	            height: 100%; width: 100%;
+	            no-repeat center center fixed;
+	            -webkit-background-size: cover;
+	            -moz-background-size: cover;
+	            -o-background-size: cover;
+	            background-size: cover;
+	            }
+	        </style>
+	    </head>
+	    <body>
+	        <img src="https://www.materialui.co/materialIcons/device/signal_wifi_statusbar_connected_no_internet_4_white_36x33.png" style="float:left"><b>mnet</br></left>
+	        <p>This network is repeating another network to devices that may not be authorized on the repeated network...</p>
+	        <form method="POST" action="do_login" name=agree>I understand and/or do not give a shit, connect me...<input type="checkbox" onchange="document.getElementById('agree').disabled = !this.checked;" /><input type="submit" name="agree" class="inputButton" id="agree" value="Connect"  disabled /></style></form>
+	    </body>
+	    </html>
+	    """
+	    #connected page
+	    html_connected = """
+	    <html>
+	    <head>
+	        <title>mnet connected</title>
+	        <style>
+	            body {
+	            color:#F1F3F3;
+	            background-color:black;
+	            height: 100%; width: 100%;
+	            no-repeat center center fixed;
+	            -webkit-background-size: cover;
+	            -moz-background-size: cover;
+	            -o-background-size: cover;
+	            background-size: cover;
+	            }
+	        </style>
+	    </head>
+	    <body>
+	        <img src="https://www.materialui.co/materialIcons/device/signal_wifi_statusbar_4_bar_white_36x33.png" style="float:left" /><b>mnet</br></left>
+	        <p>Connected</p>
+	    </body>
+	    </html>
+	    """
+	    '''
+	    if the user requests the login page show it, else
+	    use the redirect page
+	    '''
+	    def do_GET(self):
+	        path = self.path
+	        self.send_response(200)
+	        self.send_header("Content-type", "text/html")
+	        self.end_headers()
+	        if path == "/login":
+	            self.wfile.write(self.html_login)
+	        else:
+	            self.wfile.write(self.html_redirect)
+	    '''
+	    this is called when the user submits the login form
+	    '''
+	    def do_POST(self):
+	        self.send_response(200)
+	        self.send_header("Content-type", "text/html")
+	        self.end_headers()
+	        form = cgi.FieldStorage(
+	            fp=self.rfile, 
+	            headers=self.headers,
+	            environ={'REQUEST_METHOD':'POST',
+	                     'CONTENT_TYPE':self.headers['Content-Type'],
+	                     })
+	        #username = form.getvalue("username")
+	        #password = form.getvalue("password")
+	        #dummy security check
+	        #if username == 'nikos' and password == 'fotiou':
+	        agree = form.getvalue("agree")
+	        if agree == 'Connect':
+	            #authorized user
+	            remote_IP = self.client_address[0]
+	            print 'New authorization from '+ remote_IP
+	            print 'Updating IP tables'
+	            subprocess.call(["iptables","-t", "nat", "-I", "PREROUTING","1", "-s", remote_IP, "-j" ,"ACCEPT"])
+	            subprocess.call(["iptables", "-I", "FORWARD", "-s", remote_IP, "-j" ,"ACCEPT"])
+	            self.wfile.write(self.html_connected)
+	        else:
+	            #show the login form
+	            self.wfile.write(self.html_login)
+        
+	    #the following function makes server produce no output
+	    #comment it out if you want to print diagnostic messages
+	    #def log_message(self, format, *args):
+	    #    return
+#PRETTY COLOR OUTPUT
+	GRAY="\033[01;30m"
+	CYAN="\033[01;36m"
+	GREEN="\033[01;32m"
+	RED="\033[01;31m"
+	CEND="\033[0m"
+	print GRAY + "====================================================================================" + CEND
+	print CYAN +"mserv"+ CEND,
+	print "|mnet web/portal|uses iptables with python/baseHTTPServer|",
+	print GREEN + "setup portal" + CEND,
+	print "|"
+	print GRAY + "====================================================================================" + CEND
+	print GREEN + "ALLOW" + CEND,
+	print "TCP PORT 53",
+	print CYAN + "                                                     DNS" + CEND,
+	print "TABLE",
+	subprocess.call(["iptables", "-A", "FORWARD", "-i", IFACE, "-p", "tcp", "--dport", "53", "-j" ,"ACCEPT"])
+	print GREEN +"SET"+ CEND
+	print GREEN + "ALLOW" + CEND,
+	print "UDP PORT 53",
+	print CYAN + "                                                     DNS" + CEND,
+	print "TABLE",
+	subprocess.call(["iptables", "-A", "FORWARD", "-i", IFACE, "-p", "udp", "--dport", "53", "-j" ,"ACCEPT"])
+	print GREEN +"SET"+ CEND
+	print GREEN + "ALLOW" + CEND,
+	print "LOCAL SERVER",
+	print CYAN +"                                                 PORTAL"+CEND,
+	print "TABLE",
+	subprocess.call(["iptables", "-A", "FORWARD", "-i", IFACE, "-p", "tcp", "--dport", str(PORT),"-d", IP_ADDRESS, "-j" ,"ACCEPT"])
+	print GREEN +"SET"+ CEND
+	print RED +"BLOCK"+ CEND,
+	print "UNAUTHORIZED",
+	print RED +"                                                   DROP"+ CEND,
+	print "TABLE",
+	subprocess.call(["iptables", "-A", "FORWARD", "-i", IFACE, "-j" ,"DROP"])
+	print GREEN +"SET"+ CEND
+	print GRAY +"===================================================================================="+ CEND
+	print CYAN+"mserv"+ CEND,
+	print "| starting web server.. |",
+	httpd = BaseHTTPServer.HTTPServer(('', PORT), WebPortal)
+	print "redirecting HTTP                   |",
+	subprocess.call(["iptables", "-t", "nat", "-A", "PREROUTING", "-i", IFACE, "-p", "tcp", "--dport", "80", "-j" ,"DNAT", "--to-destination", IP_ADDRESS+":"+str(PORT)])
+	print CYAN+IP_ADDRESS+ ':'+str(PORT)+ CEND,
+	print GRAY+"|"+CEND
+	print GRAY +"===================================================================================="+ CEND
+
+	try:
+	    httpd.serve_forever()
+	except KeyboardInterrupt:
+	    pass
+	httpd.server_close()
+EOF
+chmod +x $DIR/mserv
+
+    if [ "$HW" = "g"   ]; then
+        BND=2.4GHz
+    else
+        BND=5GHz
+    fi
+
+#logcat -c;logcat -d -C |grep -e hostapd -e dnsmasq -e wpa -e $AP -e wlan -e nl80211 -e channel
+
+clear
+echo -e '\e[01;30m====================================================================================\e[0m'
+echo -e '\e[01;36mmnet softAP\e[0m''                           '\|'\e[0;32mBATTERY\e[0m':'\e[1;33m'$(acpi |cut -d : -f 2)'\e[0m' \| FREQ:'\e[01;36m'$FRQ'\e[0m' \| CH:'\e[01;36m'$CH'\e[0m' \| BAND:'\e[01;36m'$BND'\e[0m'\|
+echo -e '\e[01;30m====================================================================================\e[0m'
+echo -e '\e[01;32mHOST NET\e[0m''               '\| '\e[01;32m'$HSSID'\e[0m' \| $BSS \| $SIGNL \| '\e[1;35m'"$(curl -s icanhazip.com)"'\e[0m'\|
+echo -e '\e[01;36msoftAP \e[0m''                                   '\| '\e[01;36m'$SSID'\e[0m' \| "$(ifconfig "$AP" |head -n 1 |cut -d H -f 2|cut -c 7-24|tr -d ' ')" \| '\e[1;35m'"$(ifconfig "$WIFI"|head -n 2|tail -n 1|cut -d : -f 2 |cut -d B -f 1|cut -d\( -f 2 |tr -d ' ')"'\e[0m'\|
+echo -e '\e[01;30m====================================================================================\e[0m'| $DIR/mserv
+}
+
+
+if [ "$1" = down ]; then
+    DOWN || true
+    exit
+fi
+
+if [ "$1" = arp ]; then
+    cat /proc/net/arp|grep -e Device -e $AP
+    exit
+fi
+
+
+
+if [ "$1" = up ]; then
+# basic check
+CHECKS
+# stop running instances
+DOWN || true
+# scan info from current connection
+TARGET_INFO
+# set band with target
+SETHW
+# create virtual wireless interface
+CREATE_AP
+# configre newly created interface
+ADD_IP_ROUTE
+# configure acces point daemon
+HOSTAPD_CONFIG
+# start hostapd
+hostapd -d -e$DIR/entropy.bin -g$DIR/hostapd/ctrl/$AP  $DIR/hostapd.conf &
+# share internet
+INTERNET_SHARE
+# run a dhcp server to assign IP's dynamically
+# otherwise assign a static IP to connected device in subnet range (2 to 254)
+DHCP_SERVER
+# special stuffs #haveged #powersave off
+# basic summary
+WEB_PORTAL
+#captive portal
+
+fi

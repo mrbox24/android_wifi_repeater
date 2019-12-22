@@ -3,20 +3,21 @@
 #set -x
 
 
-SSID=rnet                           # set this to your desired string (avoid spaces and non-ascii characters)
+SSID=mnet                           # set this to your desired string (avoid spaces and non-ascii characters)
 WIFI=wlan0                # set this according to your device (lshw | grep -A10 Wireless | grep 'logical name')
 SUBNET=10.0.0                   # must be different than WIFI
-PASSCODE=foobarfoo
-AP=rnet
+PASSPHRASE=foobarfoo
+AP=mnet
 IP=${SUBNET}.1
-DIR=/data/local/$AP
-mkdir -p $DIR
+DIR=/data/misc/wifi
 
 USAGE()
 {
-    echo 'options'
-    printf '\t%s\n' "$(basename "$0"): up | down | clients"
-    exit
+    if [ "$1" = " " ]; then
+    	echo 'options'
+    	printf '\t%s\n' "$(basename "$0"): up | down | arp | log"
+    	exit
+    fi
 }
 
 DOWN()
@@ -24,6 +25,7 @@ DOWN()
     # hope there are no other instances of same daemons
     pkill hostapd
     kill  "$(pidof dnsmasq)"
+    pkill captive
     # remove iptables rules
     iptables -D INPUT -i $AP -p udp -m udp --dport 67 -j ACCEPT
     iptables -t nat -D POSTROUTING -s ${SUBNET}.0/24 ! -o $AP -j MASQUERADE
@@ -31,9 +33,7 @@ DOWN()
     iptables -D FORWARD -i $WIFI -d ${SUBNET}.0/24 -j ACCEPT
     # delete AP interface
     ip link show | grep "${AP}:" && iw $AP del
-    rm -r $DIR
-} >/dev/null 2>&1
-
+} > /dev/null 2>&1
 
 CHECKS()
 {
@@ -54,7 +54,7 @@ CHECKS()
 TARGET_INFO()
 {
     # Here we set vars for hostapd
-    iw wlan0 scan | head -n 11 >/data/local/tmp/scn
+    iw $WIFI scan | head -n 11 >/data/local/tmp/scn
     FRQ=$(cat /data/local/tmp/scn | grep freq | cut -d : -f 2 | tr -d ' ')
     HSSID=$(cat /data/local/tmp/scn | grep SSID | cut -d : -f 2 | tr -d ' ')
     CH=$(cat /data/local/tmp/scn | grep channel | cut -d l -f 2 | tr -d ' ')
@@ -64,13 +64,38 @@ TARGET_INFO()
 
 SETHW()
 {
-    if  [[ "$CH" -lt "14" ]]; then
+    if  [ "$CH" -lt 14 ]; then
         HW=g
-    else 
+    else
         HW=a
     fi
-}
 
+#    if  [ "$CH" -lt 14 ]; then
+#        VHCH=1
+#    else
+#        VHCH=36
+#    fi
+
+
+
+    if [ "$HW" = a ]; then
+        VHT=[VHT20][VHT40][SHORT-GI-20][SHORT-GI-40][LSIG-TXOP-PROT][GF]
+    else
+        HT=[VHT40][HT20][HT40][SHORT-GI-20][LSIG-TXOP-PROT][GF]
+    fi
+
+    if [ "$HW" = a ]; then
+        IDX=42
+    fi
+
+#    if [ "$HW" = a ]; then
+#        CLST=36,42,44,48
+#    else
+#        CLST=1,2,3,4,5,6,7,8,9,10,11
+#    fi
+
+
+}
 
 CREATE_AP()
 {
@@ -93,14 +118,19 @@ ADD_IP_ROUTE()
     ip route add ${SUBNET}.0/24 dev $AP table 97
 }
 
+
 HOSTAPD_CONFIG()
 {
     # hostapd configuration
-    mkdir -p $DIR/hostapd/ctrl
+    if [ -e $DIR/hostapd.conf ]; then
+        rm $DIR/hostapd.conf
+    fi
 	cat <<-EOF >$DIR/hostapd.conf
 	# network name
 	ssid=$SSID
-	# ap mac
+	# region
+	country_code=US
+#	country3=0x58
 	# network interface to listen on
 	interface=$AP
 	# wi-fi driver
@@ -109,27 +139,42 @@ HOSTAPD_CONFIG()
 	#ctrl_interface=/data/misc/wifi/hostapd/ctrl
 	# barrowed from host hostapd.conf
 	ignore_broadcast_ssid=0
-	# WLAN channel to use
-	channel=$CH
 	# HT config
 	ieee80211n=1
+	require_ht=1
+	ht_capab=$HT
 	ieee80211ac=1
+	require_vht=1
+	vht_capab=$VHT
 	# testing options for stability
+	ieee80211h=1
+	ieee80211d=1
+	channel=$CH
+	#op_class=$OC
+#	vht_oper_chwidth=1
+#	vht_oper_centr_freq_seg0_idx=$IDX
+#	vht_oper_centr_freq_seg1_idx=$ID2
+	# test stuffsr
 	macaddr_acl=0
 	# ser operation mode, what frequency to use
 	hw_mode=$HW
 	# enforce Wireless Protected Access (WPA)
 	wpa=2
 	# wireless protected access psk
-	wpa_passphrase=$PASSCODE
+	wpa_passphrase=$PASSPHRASE
 	# use wpa_passphrase rnet foobarfoo
 	#wpa_psk=
-	#rsn_pairwise=CCMP
+	rsn_pairwise=CCMP
 	# WPA protocol
 	wpa_key_mgmt=WPA-PSK
+	# log stuffs
+	logger_syslog=-1
+	logger_syslog_level=0
+	logger_stdout=-1
+	logger_stdout_level=0
 	EOF
-
 }
+
 
 INTERNET_SHARE()
 {
@@ -141,9 +186,14 @@ INTERNET_SHARE()
     iptables -I FORWARD -i $WIFI -d ${SUBNET}.0/24 -j ACCEPT
 }
 
+
 DHCP_SERVER()
 {
     # configuration
+    if [ -e $DIR/dnsmasq.conf ]; then
+       rm $DIR/dnsmasq.conf
+    fi
+
     cat <<-EOF >$DIR/dnsmasq.conf
 	# we dont want DNS server, only DHCP
 	port=0
@@ -152,14 +202,16 @@ DHCP_SERVER()
 	listen-address=$IP
 	#bind-interfaces
 	# range of IPs to make available to wlan devices andwhen to renew IP
-	dhcp-range=$IP,${SUBNET}.254,24h
+	dhcp-range=${SUBNET}.2,${SUBNET}.254,24h
+	# uncomment for captive portal redirect
+	address=/#/10.0.0.1
 	# where to save leases
 	dhcp-leasefile=$DIR/dnsmasq.leases
 	# set default gateway
 	dhcp-option-force=option:router,$IP
 	# add OpenDNS servers for DNS lookup to announce
-	dhcp-option-force=option:dns-server,208.67.220.220,208.67.222.222
-	#dhcp-option-force=option:mtu,1500
+	dhcp-option-force=option:dns-server,1.1.1.1,1.0.0.1
+	dhcp-option-force=option:mtu,1500
 	# respond to a client who is requesting from a different IP broadcast subnet
 	# or requesting an out of range / occupied IP
 	# or requesting an IP from expired lease of previous sessions
@@ -174,22 +226,24 @@ DHCP_SERVER()
     iptables -I INPUT -i $AP -p udp -m udp --dport 67 -j ACCEPT
 
     # start dhcp server
-    dnsmasq -x $DIR/dnsmasq.pid -C $DIR/dnsmasq.conf
+    dnsmasq -x $DIR/dnsmasq.pid -C $DIR/dnsmasq.conf &
 }
+
+
 
 if [ "$1" = down ]; then
     DOWN || true
     exit
 fi
 
-if [ "$1" = clients ]; then
-    #echo "IP address       HW type     Flags       HW address            Mask     Device"
+if [ "$1" = arp ]; then
     cat /proc/net/arp|grep -e Device -e $AP
     exit
 fi
 
-[ "$1" = up ] || USAGE
 
+
+if [ "$1" = up ]; then
 # basic check
 CHECKS
 # stop running instances
@@ -205,22 +259,27 @@ ADD_IP_ROUTE
 # configure acces point daemon
 HOSTAPD_CONFIG
 # start hostapd
-ln -s /data/misc/wifi/entropy.bin $DIR/entropy.bin
-hostapd  -B -d -e$DIR/entropy.bin -g$DIR/hostapd/ctrl/$AP  $DIR/hostapd.conf
-# share internet from Wi-Fi to AP
+hostapd -d -e$DIR/entropy.bin -g$DIR/hostapd/ctrl/$AP  $DIR/hostapd.conf &
+# share internet
 INTERNET_SHARE
 # run a dhcp server to assign IP's dynamically
 # otherwise assign a static IP to connected device in subnet range (2 to 254)
 DHCP_SERVER
-# special stuffs #haveged #powersave off
-iw dev wlan0 set power_save off
 
-if [ "$HW" = "g"   ]; then
+
+    if [ "$HW" = "g"   ]; then
     BND=2.4GHz
-else
+        else
     BND=5GHz
-fi
+    fi
 
+
+
+echo -e '\e[01;30m======================\e[0m'
+echo -e '\e[01;36mmnet w/captive portal\e[0m'
+echo -e '\e[01;30m========================================================================\e[0m'
 echo wifi: \| $HSSID \| $BSS \| "$(ifconfig "$WIFI"|head -n 2|tail -n 1|cut -d : -f 2 |cut -d B -f 1|cut -d\( -f 2 |tr -d ' ')" \| $SIGNL \|
-echo AP: \| $SSID \| "$(ifconfig "$AP" |head -n 1 |cut -d H -f 2|cut -c 7-24|tr -d ' ')" \| $IP \| $CH \| $FRQ \| $BND \|
-
+echo AP: \| $SSID \| "$(ifconfig "$AP" |head -n 1 |cut -d H -f 2|cut -c 7-24|tr -d ' ')" \| $IP \| $CH \| $FRQ \| $BND \| 
+echo -e '\e[01;30m========================================================================\e[0m'
+logcat -c;logcat -d -C |grep -e hostapd -e dnsmasq -e wpa -e $AP -e wlan -e nl80211 -e channel
+fi
